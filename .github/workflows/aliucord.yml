@@ -1,0 +1,44 @@
+name: Aliucord plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "aliucord/**"
+      - ".github/workflows/aliucord.yml"
+  pull_request:
+    paths:
+      - "aliucord/**"
+
+jobs:
+  build:
+    name: Build E2EEDiscord.zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: aliucord
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: 21
+          distribution: temurin
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :plugins:E2EEDiscord:make
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v7
+        with:
+          name: E2EEDiscord-aliucord
+          if-no-files-found: error
+          path: aliucord/plugins/E2EEDiscord/build/outputs/*.zip

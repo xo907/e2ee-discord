@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        { "header": "Access-Control-Allow-Origin", "operation": "set", "value": "*" }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https://(cdn\\.discordapp\\.com|media\\.discordapp\\.net)/(ephemeral-)?attachments/",
+      "initiatorDomains": ["discord.com", "ptb.discord.com", "canary.discord.com"],
+      "resourceTypes": ["xmlhttprequest", "other"]
+    }
+  }
+]

@@ -1,0 +1,12 @@
+E2EE-Discord — Made by XO.ST
+https://github.com/xo907/e2ee-discord
+
+This project is a modified version of SimpleDiscordCrypt by An0
+(https://gitlab.com/An0/SimpleDiscordCrypt), which was released under the
+GNU Lesser General Public License v3. The "Key Visualizer" (EmojiHash) is also
+by An0. E2EE-Discord is distributed under the same license; see LICENSE.
+
+Changes from SimpleDiscordCrypt (2026): rebranded UI and icons; rewritten
+module discovery for current Discord builds; new send/upload/receive hooks;
+host-agnostic core with userscript, Manifest V3 extension, Vencord and
+BetterDiscord builds; consent before automatic key exchanges; bug fixes.

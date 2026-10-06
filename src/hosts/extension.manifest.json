@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "E2EE-Discord",
+  "short_name": "E2EE-Discord",
+  "version": "{{VERSION}}",
+  "description": "End-to-end encryption for Discord messages and files, with automatic key exchange. Made by XO.ST",
+  "author": "XO.ST",
+  "homepage_url": "https://github.com/xo907/e2ee-discord",
+  "icons": {
+    "16": "icons/logo-16.png",
+    "32": "icons/logo-32.png",
+    "48": "icons/logo-48.png",
+    "128": "icons/logo-128.png"
+  },
+  "permissions": ["storage", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": [
+    "https://discord.com/*",
+    "https://ptb.discord.com/*",
+    "https://canary.discord.com/*",
+    "https://cdn.discordapp.com/*",
+    "https://media.discordapp.net/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [{ "id": "attachment-cors", "enabled": true, "path": "rules.json" }]
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://discord.com/*", "https://ptb.discord.com/*", "https://canary.discord.com/*"],
+      "exclude_matches": ["https://discord.com/developers/*", "https://discord.com/oauth2/*", "https://discord.com/api/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://discord.com/*", "https://ptb.discord.com/*", "https://canary.discord.com/*"],
+      "exclude_matches": ["https://discord.com/developers/*", "https://discord.com/oauth2/*", "https://discord.com/api/*"],
+      "js": ["e2ee-discord.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "e2ee-discord@xo.st",
+      "strict_min_version": "128.0"
+    }
+  }
+}
