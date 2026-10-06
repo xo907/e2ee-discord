@@ -45,6 +45,6 @@ aliucord {
         """.trimIndent(),
     )
 
-    // Not published to Aliucord's plugin repositories until sending and key exchange are done
+    // Distributed from this repository (dist/ and the Actions artifact), not Aliucord's plugin repositories
     deploy.set(false)
 }

@@ -21,7 +21,7 @@ People without the plugin see a block of braille-like characters with a small li
 | **Firefox 128+** | Same extension (load `extension/manifest.json` as a temporary add-on), or the userscript |
 | **Any browser** | Userscript: install [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/), then open [`dist/E2EE-Discord.user.js`](dist/E2EE-Discord.user.js) |
 | **BetterDiscord** | Copy [`betterdiscord/E2EEDiscord.plugin.js`](betterdiscord/E2EEDiscord.plugin.js) into your plugins folder |
-| **Android** | [Aliucord](https://github.com/Aliucord/Aliucord) plugin, read-only for now — see [aliucord/README.md](aliucord/README.md) |
+| **Android** | [Aliucord](https://github.com/Aliucord/Aliucord) plugin: read, send and edit encrypted messages, key exchange, encrypted files and media — see [aliucord/README.md](aliucord/README.md) |
 
 Only install it from this repository.
 

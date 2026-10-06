@@ -1,6 +1,6 @@
 # E2EE-Discord protocol
 
-This describes the on-the-wire format, so other clients (for example a future Aliucord/Android port in Kotlin) can talk to the JS plugin. It's compatible with SimpleDiscordCrypt. Reference implementation: [`src/core.js`](src/core.js).
+This describes the on-the-wire format, so other clients can talk to the JS plugin (the Aliucord/Android port in [`aliucord/`](aliucord/) implements it in Kotlin). It's compatible with SimpleDiscordCrypt. Reference implementation: [`src/core.js`](src/core.js).
 
 ## Primitives
 
