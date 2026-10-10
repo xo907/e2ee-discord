@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         E2EE-Discord
 // @namespace    https://github.com/xo907/e2ee-discord
-// @version      2.0.2
+// @version      3.0.0
 // @description  End-to-end encryption for Discord messages and files, with automatic key exchange. Made by XO.ST
 // @author       XO.ST
 // @license      LGPL-3.0-or-later

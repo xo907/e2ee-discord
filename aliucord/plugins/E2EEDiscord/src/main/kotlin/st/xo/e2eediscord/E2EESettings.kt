@@ -8,6 +8,8 @@ package st.xo.e2eediscord
 
 import android.annotation.SuppressLint
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.widget.TextView
@@ -81,13 +83,32 @@ class E2EESettings(private val plugin: E2EEDiscord) : SettingsPage() {
                     text = "Unlock"
                     setOnClickListener {
                         val password = passwordInput.editText.text?.toString().orEmpty()
-                        if (database.unlock(password)) {
-                            plugin.onDatabaseChanged()
-                            Utils.showToast("Unlocked — reopen a channel to see decrypted messages")
-                            reRender()
-                        } else {
-                            Utils.showToast("Wrong password")
-                        }
+                        val mainHandler = Handler(Looper.getMainLooper())
+                        isEnabled = false
+                        text = "Unlocking…"
+                        // checking the password of a 3.0 database takes a second or two
+                        Thread {
+                            val failure = try {
+                                if (database.unlock(password)) null else "Wrong password"
+                            } catch (e: Throwable) {
+                                e.message ?: "Couldn't unlock the database"
+                            }
+                            mainHandler.post {
+                                try {
+                                    if (failure == null) {
+                                        plugin.onDatabaseChanged()
+                                        Utils.showToast("Unlocked — reopen a channel to see decrypted messages")
+                                        reRender()
+                                    } else {
+                                        isEnabled = true
+                                        text = "Unlock"
+                                        Utils.showToast(failure, true)
+                                    }
+                                } catch (e: Throwable) {
+                                    // the settings page was closed meanwhile
+                                }
+                            }
+                        }.start()
                     }
                 },
             )

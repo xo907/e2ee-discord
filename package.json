@@ -1,0 +1,15 @@
+{
+  "name": "e2ee-discord",
+  "version": "3.0.0",
+  "private": true,
+  "description": "End-to-end encryption for Discord messages and files. Made by XO.ST",
+  "license": "LGPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "build": "powershell -ExecutionPolicy Bypass -File build.ps1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

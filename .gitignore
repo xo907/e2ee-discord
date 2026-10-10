@@ -10,4 +10,4 @@ node_modules/
 # superseded builds (only the current release of each is kept in dist/)
 dist/E2EEDiscord-aliucord-0.[0-3].*.zip
 dist/E2EEDiscord-aliucord-0.4.[0-3].zip
-dist/E2EE-Discord-extension-2.0.[0-1].zip
+dist/E2EE-Discord-extension-2.*.zip

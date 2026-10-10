@@ -6,9 +6,11 @@
 
 ---
 
-E2EE-Discord encrypts your messages and attachments **in your client** before they reach Discord, and decrypts them for everyone else who has the plugin and the key. Keys are exchanged automatically over DMs (ECDH P-521), and messages are encrypted with AES-256.
+E2EE-Discord encrypts your messages and attachments **in your client** before they reach Discord, and decrypts them for everyone else who has the plugin and the key. Keys are exchanged automatically over DMs (ECDH P-521), and messages are encrypted with AES-256 and sealed so that a changed message is refused instead of shown.
 
 People without the plugin see a block of braille-like characters with a small link back to this page.
+
+**New in 3.0:** sealed (tamper-evident) messages, a hardened key vault, and a lock with auto-lock. It still talks to 2.x and SimpleDiscordCrypt. See the [changelog](CHANGELOG.md).
 
 > E2EE-Discord is a revived, modernised fork of [SimpleDiscordCrypt](https://gitlab.com/An0/SimpleDiscordCrypt) by An0, which was abandoned. It reads SimpleDiscordCrypt messages and databases, so existing keys keep working.
 
@@ -69,11 +71,27 @@ curl -fsSL https://raw.githubusercontent.com/xo907/e2ee-discord/main/install-ven
 - **Prefixes:** start a message with `ENC` to encrypt one message, or `NOENC` to send one in plain text.
 - Decrypted messages start with a **red lock**. A **white lock** means the message used a different key than the one selected for the channel; hover over it to see which key.
 
+### Sealed messages
+
+Every message you send carries a seal. If a message was changed after it was sent, the seal no longer fits and you see **"This encrypted message was altered after it was sent"** instead of its text.
+
+Messages from 2.x and SimpleDiscordCrypt have no seal and are read as before. In a channel where everyone has updated, turn on *Require sealed messages* in the menu: messages without a seal are then marked "Not sealed".
+
+A seal shows that the message comes from someone who has the key and was not changed since. It can't tell you which member of a group wrote it, and attached files are not sealed yet.
+
+### Lock
+
+If your database has a password, *Lock now* in the menu (or **Alt+Shift+L**) removes your keys from memory and covers Discord until you type the password. *Auto-lock* does the same after 5, 15 or 60 minutes without activity.
+
+While locked, new messages wait and are decrypted when you unlock. Sending to a channel with encryption on is refused, so nothing goes out unencrypted by accident.
+
 ### Database
 
 Your keys live in a local database, optionally protected with a password. **Export it regularly** (menu → *Export Database*).
 
 To use E2EE-Discord on more than one device, export from your main device and import on the others as **Secondary**. If you used SimpleDiscordCrypt before, your database is picked up automatically when possible; otherwise import your old `.dat`/`.json` export.
+
+A password-protected database from 2.x is moved to the stronger 3.0 format the first time you unlock it. Exports made after that open in 3.0 (and the Android plugin 0.5.0) only, so update your other devices before importing a new export on them.
 
 ### Key verification
 
@@ -92,10 +110,11 @@ E2EEClearChannels(c => c.lastseen < Date.now() - 180 * 864e5)
 
 ## Security notes
 
-- Messages: AES-256-CBC. Key exchange: ECDH P-521. Everything uses the browser's Web Crypto API.
+- Messages: AES-256-CBC, sealed with HMAC-SHA-256. Key exchange: ECDH P-521. Everything uses the browser's Web Crypto API.
 - Discord can still see **who** you talk to, **when**, and roughly **how long** each message is.
 - Key exchanges are only as trustworthy as the first exchange. Compare keys with *Visualize Key*.
-- The database password is checked with a salted SHA-512 hash. Pick a strong password if your device could be accessed by others.
+- The database password protects your keys through PBKDF2-HMAC-SHA-512 with 600,000 rounds. That slows down guessing, but it can't save a weak password: pick a strong one if your device or your exports could be reached by others.
+- Locking clears the keys the plugin holds. Messages already decrypted on screen stay in Discord's own memory until you reload.
 - Client mods and userscripts break Discord's Terms of Service. Use at your own risk.
 
 ## Development
@@ -105,7 +124,12 @@ Everything is built from one file, [`src/core.js`](src/core.js). Each platform o
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1      # builds dist/, extension/, vencord/, betterdiscord/
 powershell -ExecutionPolicy Bypass -File scripts\make-icons.ps1
+npm test                                                # needs Node 22+, no dependencies
 ```
+
+**Tests.** `npm test` runs the real core in Node against a fake Discord ([`test/helpers/harness.mjs`](test/helpers/harness.mjs)): two clients do a key exchange, send each other sealed messages, share a group key, lock and unlock. Seals and the vault are compared with an independent implementation.
+
+**Playground.** Serve the repository (`python -m http.server`) and open `/test/playground.html` to try the lock button, menu, windows and lock screen in a pretend Discord, and to see what each message looks like on the wire. No account needed, and nothing leaves the page.
 
 The core is written to survive Discord updates:
 

@@ -16,6 +16,7 @@ internal class MessageDecryptor(private val database: KeyDatabase, private val l
         const val NO_DATABASE_HINT = "🔒 *Encrypted message* — import your E2EE-Discord key database in Settings → Plugins → E2EEDiscord"
         const val MISSING_KEY_HINT = "🔒 *Encrypted message* — this phone doesn't have the key yet. It's requested automatically when \"answer key exchanges\" is on; otherwise re-import your database from desktop."
         const val INVALID_HINT = "⚠️ *Encrypted message in an unknown format*"
+        const val TAMPERED_HINT = "⛔ *This encrypted message was altered after it was sent*, so it is not shown."
         const val SYSTEM_MESSAGE_HINT = "🔑 *E2EE-Discord key exchange*"
 
         private const val CACHE_SIZE = 500
@@ -44,7 +45,7 @@ internal class MessageDecryptor(private val database: KeyDatabase, private val l
         val result = if (maybePayload) {
             val matcher = Protocol.messagePattern.matcher(content)
             if (!matcher.matches()) return null
-            decrypt(matcher.group(1)!!)
+            decrypt(matcher.group(1)!!, content)
         } else {
             if (!Protocol.systemMessagePattern.matcher(content).matches()) return null
             SYSTEM_MESSAGE_HINT
@@ -74,6 +75,7 @@ internal class MessageDecryptor(private val database: KeyDatabase, private val l
         if (bytes.size < 16) return null
         val keyHash = Protocol.base64(bytes.copyOf(16))
         val key = (database.getKey(keyHash) as? KeyLookup.Found)?.key ?: return null
+        if (!Protocol.sealMatches(key, bytes, content)) return null
         if (bytes.size == 16) return Plaintext(keyHash, "")
         return try {
             val plain = Protocol.tryDecompress(Protocol.aesDecrypt(key, bytes.copyOfRange(16, bytes.size)))
@@ -91,13 +93,16 @@ internal class MessageDecryptor(private val database: KeyDatabase, private val l
         val bytes = Protocol.payloadDecode(matcher.group(1)!!)
         if (bytes.size < 16) return null
         return try {
+            // a message that fails its seal check doesn't get its files opened either
             (database.getKey(Protocol.base64(bytes.copyOf(16))) as? KeyLookup.Found)?.key
+                ?.takeIf { Protocol.sealMatches(it, bytes, content) }
         } catch (e: Throwable) {
             null
         }
     }
 
-    private fun decrypt(payload: String): String {
+    /** [content] is the whole message, so its seal can be checked; null for a nested payload, which has none */
+    private fun decrypt(payload: String, content: String? = null): String {
         val bytes = Protocol.payloadDecode(payload)
         if (bytes.size < 16) return INVALID_HINT
         val keyHash = Protocol.base64(bytes.copyOf(16))
@@ -114,6 +119,10 @@ internal class MessageDecryptor(private val database: KeyDatabase, private val l
             KeyLookup.Locked -> UNLOCK_HINT
             KeyLookup.Missing -> MISSING_KEY_HINT
             is KeyLookup.Found -> {
+                if (content != null && !Protocol.sealMatches(key.key, bytes, content)) {
+                    logger.warn("A message failed its seal check and was not shown")
+                    return TAMPERED_HINT
+                }
                 // a bare key hash marks an attachment-only message
                 if (bytes.size == 16) return DECRYPTED_PREFIX.trimEnd()
                 try {

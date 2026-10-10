@@ -4,6 +4,8 @@ Made by **XO.ST** · https://github.com/xo907/e2ee-discord
 
 An [Aliucord](https://github.com/Aliucord/Aliucord) plugin for messages encrypted by E2EE-Discord (or SimpleDiscordCrypt) on desktop. It uses the same keys, so anything you can read on your computer you can read on your phone, and it can send encrypted messages and files too.
 
+Plugin 0.5.0 goes with E2EE-Discord 3.0 on desktop: it sends [sealed](../README.md#sealed-messages) messages, refuses altered ones, and opens databases exported from 3.0. You need 0.5.0 to import a password-protected database exported from desktop 3.0. Older exports, and messages from older versions, keep working.
+
 ## Status: phase 4
 
 | | |
@@ -13,6 +15,7 @@ An [Aliucord](https://github.com/Aliucord/Aliucord) plugin for messages encrypte
 | ✅ Send and edit encrypted messages (`/e2ee on`) | phase 2 |
 | ✅ Key exchange: DM keys, personal keys, key requests and shares | phase 3 |
 | ✅ Encrypted files, images, video and audio | phase 4 |
+| ✅ Sealed messages and 3.0 databases | 0.5.0 |
 
 ### Files and media
 
@@ -35,6 +38,7 @@ Key exchanges only happen in DMs, and the other person needs E2EE-Discord too. T
 ### Sending
 
 - `/e2ee on` and `/e2ee off` turn encryption on or off for the current chat. `/e2ee status` shows the current state.
+- While encryption is on in the chat you have open, the message box has a **red outline** and its placeholder reads **🔒 Encrypted · key name**, like the red outline on desktop. If the database is locked, the placeholder says so instead.
 - `/e2ee keys` lists your keys. `/e2ee keys key:2` switches this chat to key 2.
 - Start a single message with `ENC` to encrypt just that one, or `NOENC` to send just that one unencrypted.
 - Editing an encrypted message shows its plaintext and always re-encrypts it with the same key.

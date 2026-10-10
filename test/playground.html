@@ -1,0 +1,207 @@
+<!doctype html>
+<!--
+  E2EE-Discord playground — Made by XO.ST
+
+  Runs the real src/core.js against a pretend Discord, so the interface (lock button, menu,
+  windows, lock screen) and the wire format can be tried without a Discord account.
+  Open this file in a browser. Nothing leaves the page; the key database is kept in this
+  page's localStorage ("Reset" clears it).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E2EE-Discord playground</title>
+<style>
+  :root { --font-primary: "Segoe UI", system-ui, sans-serif; --interactive-normal: #b5bac1; --text-muted: #949ba4; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; background: #313338; color: #dbdee1; font: 15px/1.4 var(--font-primary); }
+  nav { width: 220px; background: #2b2d31; padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
+  nav h1 { font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: #949ba4; margin: 4px 8px 8px; }
+  nav button { all: unset; cursor: pointer; padding: 7px 10px; border-radius: 4px; color: #949ba4; }
+  nav button:hover { background: #35373c; color: #dbdee1; }
+  nav button.selected { background: #404249; color: #fff; }
+  nav .tools { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-top: 1px solid #1e1f22; }
+  nav .tools label { font-size: 13px; color: #b5bac1; display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  nav .tools button { background: #1e1f22; text-align: center; font-size: 13px; }
+  main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  /* the class names below are the prefixes the plugin looks for in Discord */
+  .chat_x { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  section.title_x { height: 48px; flex: none; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid #1e1f22; font-weight: 600; }
+  section.title_x .toolbar_x { margin-left: auto; display: flex; align-items: center; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .message b.author { color: #fff; margin-right: 8px; }
+  .message time { color: #949ba4; font-size: 12px; }
+  .message .shown { white-space: pre-wrap; word-break: break-word; }
+  .message .shown small { color: #949ba4; font-size: 12px; }
+  .message .shown img.marker { width: 18px; height: 18px; vertical-align: -3px; margin-right: 4px; }
+  .message details { margin-top: 4px; font-size: 12px; color: #949ba4; }
+  .message details code { display: block; white-space: pre-wrap; word-break: break-all; background: #1e1f22; padding: 8px; border-radius: 4px; margin-top: 4px; color: #b5bac1; }
+  form { padding: 0 16px 20px; flex: none; }
+  .channelTextArea_x { background: #383a40; border-radius: 8px; display: flex; align-items: center; }
+  .scrollableContainer_x { flex: 1; display: flex; border-radius: 8px; }
+  .scrollableContainer_x input { all: unset; flex: 1; padding: 12px 14px; color: #dbdee1; }
+  .buttons_x { display: flex; align-items: center; padding-right: 8px; }
+  .hint { color: #949ba4; font-size: 12px; padding: 0 16px 10px; }
+</style>
+</head>
+<body>
+<nav>
+  <h1>Playground server</h1>
+  <div id="channels"></div>
+  <div class="tools">
+    <label><input type="checkbox" id="tamper"> Alter my next message in transit</label>
+    <label><input type="checkbox" id="strip"> Strip the seal from my next message</label>
+    <button type="button" id="reset">Reset (delete the database)</button>
+  </div>
+</nav>
+<main class="chatContent_x">
+  <div class="chat_x">
+    <section class="title_x"><span id="channel-name"></span><div class="toolbar_x"></div></section>
+    <div id="messages"></div>
+    <div class="hint">Click the lock to turn encryption on. Right-click it (or click the key chip) for the menu. "On the wire" shows what Discord would store.</div>
+    <form autocomplete="off">
+      <div class="channelTextArea_x">
+        <div class="scrollableContainer_x"><input id="input" placeholder="Message" autocomplete="off"></div>
+        <div class="buttons_x"></div>
+      </div>
+    </form>
+  </div>
+</main>
+
+<script src="../src/core.js"></script>
+<script>
+(() => {
+  const me = { id: '100000000000000001', username: 'you', globalName: 'You', discriminator: '0' };
+  const channels = [
+    { id: '200000000000000001', type: 0, guild_id: '300000000000000001', name: 'secret-plans' },
+    { id: '200000000000000002', type: 0, guild_id: '300000000000000001', name: 'lobby' },
+  ];
+  let selected = channels[0].id;
+  let nextId = 400000000000000000n;
+  const shown = []; // messages as the plugin handed them to "Discord"
+  const wire = new Map(); // id -> content as sent
+
+  const escape = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const format = (content) =>
+    escape(content)
+      // the plugin marks decrypted messages with a custom emoji and restyles it through CSS
+      .replace(/^&lt;:ENC(?:_\w*)?:(\d+)&gt;/, '<img class="marker" alt="[decrypted]" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=#/emojis/$1">')
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/\[([^\]]+)\]\(&lt;[^)]*&gt;\)/g, '<u>$1</u>')
+      .replace(/^-# (.*)$/gm, '<small>$1</small>');
+
+  function render() {
+    document.getElementById('channel-name').textContent = '# ' + channels.find((c) => c.id === selected).name;
+    for (const button of document.querySelectorAll('#channels button'))
+      button.classList.toggle('selected', button.dataset.id === selected);
+    const list = document.getElementById('messages');
+    list.textContent = '';
+    for (const message of shown.filter((m) => m.channel_id === selected)) {
+      const item = document.createElement('div');
+      item.className = 'message';
+      item.innerHTML =
+        `<b class="author">${escape(message.author.globalName)}</b><time>${new Date(message.timestamp).toLocaleTimeString()}</time>` +
+        `<div class="shown">${format(message.content)}</div>` +
+        `<details><summary>On the wire (${wire.get(message.id).length} characters)</summary><code>${escape(wire.get(message.id))}</code></details>`;
+      list.appendChild(item);
+    }
+    list.scrollTop = list.scrollHeight;
+  }
+
+  // ── just enough of Discord's modules for the plugin to hook
+  const dispatcher = {
+    dispatch(event) {
+      if (event.type === 'MESSAGE_CREATE') shown.push(event.message);
+      if (event.type === 'MESSAGE_UPDATE') {
+        const index = shown.findIndex((m) => m.id === event.message.id);
+        if (index !== -1) shown[index] = event.message;
+      }
+      render();
+    },
+    subscribe() {},
+    addInterceptor() {},
+  };
+  const store = (name, methods) => Object.assign(new (class { static displayName = name; })(), methods);
+  const messageQueue = {
+    enqueue(packet, callback) {
+      let content = packet.message.content;
+      const payload = /^[⠀-⣿]+/.exec(content)?.[0];
+      if (payload != null && document.getElementById('tamper').checked) {
+        const at = payload.length - 20;
+        content = content.slice(0, at) + String.fromCharCode(content.charCodeAt(at) ^ 1) + content.slice(at + 1);
+        document.getElementById('tamper').checked = false;
+      }
+      if (payload != null && document.getElementById('strip').checked) {
+        content = content.replace(/#s=[A-Za-z0-9_-]{22}/, '');
+        document.getElementById('strip').checked = false;
+      }
+      const message = {
+        id: String(nextId++),
+        channel_id: packet.message.channelId,
+        content,
+        author: { ...me },
+        timestamp: new Date().toISOString(),
+        attachments: [],
+        embeds: [],
+      };
+      wire.set(message.id, content);
+      // back through the (hooked) dispatcher, the way a gateway event would arrive
+      dispatcher.dispatch({ type: 'MESSAGE_CREATE', channelId: message.channel_id, message });
+      if (typeof callback === 'function') callback({ ok: true });
+    },
+    handleSend() {},
+  };
+  const modules = [
+    dispatcher,
+    messageQueue,
+    store('UserStore', { getUser: (id) => (id === me.id ? me : null), getCurrentUser: () => me, getUsers: () => ({}) }),
+    store('ChannelStore', { getChannel: (id) => channels.find((c) => c.id === id) ?? null, getDMFromUserId: () => null }),
+    store('SelectedChannelStore', { getChannelId: () => selected, getVoiceChannelId: () => null, getLastSelectedChannelId: () => selected }),
+    store('GuildStore', { getGuild: () => ({ name: 'Playground' }), getGuildCount: () => 1 }),
+  ];
+  const cache = Object.fromEntries(modules.map((exports, index) => [index, { exports, loaded: true }]));
+  const chunk = [];
+  chunk.push = (entry) => typeof entry?.[2] === 'function' && entry[2]({ c: cache });
+  window.webpackChunkdiscord_app = chunk;
+
+  // ── page controls
+  const channelList = document.getElementById('channels');
+  for (const channel of channels) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.id = channel.id;
+    button.textContent = '# ' + channel.name;
+    button.addEventListener('click', () => {
+      selected = channel.id;
+      dispatcher.dispatch({ type: 'CHANNEL_SELECT', channelId: channel.id, guildId: channel.guild_id });
+    });
+    channelList.appendChild(button);
+  }
+  document.querySelector('form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const input = document.getElementById('input');
+    if (input.value === '') return;
+    messageQueue.enqueue({ type: 0, message: { channelId: selected, content: input.value, nonce: String(nextId++) } }, (result) => {
+      if (result && result.ok === false) console.warn('send refused:', result.body?.message);
+    });
+    input.value = '';
+  });
+  document.getElementById('reset').addEventListener('click', () => {
+    localStorage.removeItem('E2EEDiscord');
+    location.reload();
+  });
+  render();
+
+  // no network: the playground does not download the server blacklist
+  const offline = async () => {
+    throw new Error('offline');
+  };
+  window.fetch = offline;
+  window.e2ee = E2EEDiscord({ name: 'playground', window, testHooks: true, fetchBinary: offline });
+  window.e2ee.start();
+})();
+</script>
+</body>
+</html>

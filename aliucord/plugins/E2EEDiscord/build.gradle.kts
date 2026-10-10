@@ -1,9 +1,18 @@
-version = "0.4.4" // Increment to push an update to installed copies
+version = "0.5.0" // Increment to push an update to installed copies
 description = "End-to-end encrypted messages, compatible with E2EE-Discord on desktop. Made by XO.ST"
 
 aliucord {
     changelog.set(
         """
+        # 0.5.0
+        * Works with E2EE-Discord 3.0 on desktop.
+        * While encryption is on in the open chat, the message box has a red outline and its placeholder
+          shows a lock and the key in use, like the red outline on desktop.
+        * Sealed messages: messages you send carry a seal, and a message that was altered after it was sent
+          is refused instead of shown. Messages from older versions, which have no seal, are read as before.
+        * Opens databases exported from 3.0, whose password is protected with PBKDF2. Older exports still work.
+        * Unlocking no longer freezes the settings page while the password is checked.
+
         # 0.4.4
         * Fix: text sent from the phone could be encrypted twice (showing ciphertext instead of your message).
           Decrypted text is now shown through a private copy of each message and never touches Discord's stored messages,

@@ -62,20 +62,47 @@ internal class KeyDatabase(privateDir: File) {
         reset()
     }
 
-    @Synchronized
+    /**
+     * Not synchronized as a whole: a 3.0 vault's PBKDF2 takes a second or two, and message rendering
+     * (which reads keys under the same lock) must not wait for it. Call it off the main thread.
+     */
     fun unlock(password: String): Boolean {
-        val db = json ?: return false
-        if (!isEncrypted) return true
+        val db = synchronized(this) { json } ?: return false
+        if (!db.optBoolean("isEncrypted", false)) return true
+        if (password.isEmpty()) return false
 
+        val key = (if (db.has("kdf")) vaultKey(db, password) else legacyVaultKey(db, password)) ?: return false
+        synchronized(this) {
+            dbKey = key
+            keyCache.clear()
+            version++
+        }
+        return true
+    }
+
+    /** Desktop 3.0 databases: PBKDF2-HMAC-SHA-512 gives the database key (32 bytes) ‖ a password check (16 bytes) */
+    private fun vaultKey(db: JSONObject, password: String): ByteArray? {
+        val iterations = db.optInt("kdfIterations")
+        if (db.optString("kdf") != "PBKDF2-SHA512" || iterations < 1) {
+            throw IllegalStateException("This database was made by a newer E2EE-Discord. Update the plugin.")
+        }
+        val derived = Protocol.pbkdf2Sha512(
+            password.toByteArray(Charsets.UTF_8),
+            Protocol.fromBase64(db.optString("kdfSalt")),
+            iterations,
+            48,
+        )
+        if (Protocol.base64(derived.copyOfRange(32, 48)) != db.optString("dbPasswordHash")) return null
+        return derived.copyOf(32)
+    }
+
+    /** 2.x and SimpleDiscordCrypt databases: salted SHA-512 */
+    private fun legacyVaultKey(db: JSONObject, password: String): ByteArray? {
         val passwordHash = Protocol.base64(
             Protocol.sha512((password + db.opt("dbPasswordSalt")?.toString()).toByteArray(Charsets.UTF_8)).copyOf(16),
         )
-        if (passwordHash != db.optString("dbPasswordHash")) return false
-
-        dbKey = Protocol.sha512((password + db.opt("dbKeySalt")?.toString()).toByteArray(Charsets.UTF_8)).copyOf(32)
-        keyCache.clear()
-        version++
-        return true
+        if (passwordHash != db.optString("dbPasswordHash")) return null
+        return Protocol.sha512((password + db.opt("dbKeySalt")?.toString()).toByteArray(Charsets.UTF_8)).copyOf(32)
     }
 
     @Synchronized

@@ -13,6 +13,7 @@
  *   host.fetchBinary   (url) => Promise<ArrayBuffer>, used when the page itself can't fetch (CSP)
  *   host.name          'userscript' | 'extension' | 'vencord' | 'betterdiscord'
  *   host.dryRun        true: never send key-exchange messages (for testing)
+ *   host.testHooks     true: the returned object also exposes internals (automated tests only)
  */
 function E2EEDiscord(host) {
   'use strict';
@@ -25,7 +26,7 @@ function E2EEDiscord(host) {
 
   const AppName = 'E2EE-Discord';
   const AppCredit = 'Made by XO.ST';
-  const AppVersion = '2.0.2';
+  const AppVersion = '3.0.0';
   const ProjectUrl = 'https://github.com/xo907/e2ee-discord';
   const BlacklistUrl =
     'https://raw.githubusercontent.com/xo907/e2ee-discord/main/blacklist.txt';
@@ -41,6 +42,12 @@ function E2EEDiscord(host) {
   const DiffKeyTrigger = 10;
   const MessageLengthLimit = 2000;
 
+  // Key vault (database password). PBKDF2 makes guessing a password slow; the old format
+  // was a single salted SHA-512 and is upgraded the first time it is unlocked.
+  const VaultKdfName = 'PBKDF2-SHA512';
+  const VaultKdfIterations = 600000;
+  const AutoLockChoices = [0, 5, 15, 60]; // minutes, 0 = off
+
   // Custom emoji used as the "decrypted" marker in front of messages. They are only
   // used for their id; the image is replaced with our own icon through CSS.
   const EncEmojiId = '465534298662109185';
@@ -55,6 +62,13 @@ function E2EEDiscord(host) {
   const SystemMessageHeader = '```ml\n-----SYSTEM MESSAGE-----\n```';
   const SystemTagLine = `-# 🔑 ${AppName} key exchange · [what is this?](<${ProjectUrl}>)`;
 
+  // Seal: a MAC over the payload, carried in the tag's link so that clients which don't
+  // know about it (2.x, SimpleDiscordCrypt) still read the message. See PROTOCOL.md.
+  const SealInfo = 'E2EE-Discord seal v1';
+  const sealRegex = /e2ee-discord#s=([A-Za-z0-9_-]{22})(?![A-Za-z0-9_-])/i;
+  const MessageTagLineSealed = (seal) => `-# 🔒 Encrypted with [${AppName}](<${ProjectUrl}#s=${seal}>)`;
+  const MessageTagShortSealed = (seal) => `[🔒](<${ProjectUrl}#s=${seal}>)`;
+
   // Payload (braille-encoded bytes) followed by our tag, or the legacy SimpleDiscordCrypt tag.
   const messageRegex =
     /^([⠀-⣿]{16,})(?:[ \t]*`(?:SimpleDiscordCrypt|𝘚𝘪𝘮𝘱𝘭𝘦𝘋𝘪𝘴𝘤𝘰𝘳𝘥𝘊𝘳𝘺𝘱𝘵)`|\s+[^\n]*e2ee-discord[^\n]*)$/i;
@@ -68,6 +82,8 @@ function E2EEDiscord(host) {
   const unknownKeySystemMessage = '-# 🔑 Key exchange message encrypted with a key you don\'t have';
   const invalidSystemMessage = '-# ⚠️ Key exchange message in an unknown format';
   const blockedSystemMessage = '-# 🔑 Key exchange message blocked';
+  const tamperedMessage = `⛔ **This encrypted message was altered after it was sent**, so it is not shown.\n-# Its seal doesn't match · [${AppName}](<${ProjectUrl}>)`;
+  const unsealedNote = "\n-# ⚠️ Not sealed — this message can't be checked for tampering";
 
   /* ──────────────────────────────── Icons ──────────────────────────────── */
 
@@ -141,6 +157,9 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     pointer-events: none;
 }
 .e2ee-cover { background: rgba(0,0,0,.82); pointer-events: auto; }
+/* lock screen: hides everything, and sits above our own popups and menu */
+.e2ee-locked .e2ee-cover { background: rgba(0,0,0,.96); backdrop-filter: blur(24px); z-index: 10010; }
+.e2ee-locked .e2ee-overlay, .e2ee-locked .e2ee-window { z-index: 10011; }
 .e2ee-window {
     display: flex;
     background: #0b0b0b;
@@ -514,36 +533,68 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
   /* ──────────────────────────────── Windows ──────────────────────────────── */
 
   const UnlockWindow = {
-    html: `<div class="e2ee-ui">
+    html: (locked) => `<div class="e2ee-ui${locked ? ' e2ee-locked' : ''}">
 <div class="E2EE_CANCEL e2ee-cover"></div>
 <div class="e2ee-overlay">
     <form class="E2EE_UNBLOCK e2ee-window" style="width:460px">
-        ${TitleBar('Unlock Database', 'Your encryption keys are protected by a password')}
+        ${
+          locked
+            ? TitleBar(`${AppName} is locked`, 'Your keys were cleared from memory. Enter your password to continue')
+            : TitleBar('Unlock Database', 'Your encryption keys are protected by a password')
+        }
         <h5 style="margin-top:18px">Password</h5>
         ${PasswordField('current-password', 0)}
         <p class="E2EE_ERROR e2ee-error" style="display:none">Wrong password</p>
         <div style="height:20px"></div>
-        <div class="e2ee-footer"><p class="e2ee-credit">${AppCredit}</p><button type="button" class="E2EE_CANCEL e2ee-lnkbtn">Cancel</button><button type="button" class="E2EE_NEWDB e2ee-rbtn">New DB</button><button type="submit" class="e2ee-btn" style="min-width:96px">Unlock</button></div>
+        <div class="e2ee-footer"><p class="e2ee-credit">${AppCredit}</p>${
+          locked
+            ? ''
+            : '<button type="button" class="E2EE_CANCEL e2ee-lnkbtn">Cancel</button><button type="button" class="E2EE_NEWDB e2ee-rbtn">New DB</button>'
+        }<button type="submit" class="E2EE_SUBMIT e2ee-btn" style="min-width:96px">Unlock</button></div>
     </form>
 </div>
 </div>`,
-    Show: function (passwordCallback, newdbCallback, cancelCallback, wrongPassword) {
+    // tryPassword(password) resolves to true if the password was right. The window stays up
+    // while it is checked, so a wrong password never uncovers a locked screen.
+    Show: function (tryPassword, newdbCallback, cancelCallback, locked) {
       this.Remove();
       let wrapper = document.createElement('div');
-      wrapper.innerHTML = this.html;
-      if (wrongPassword)
-        wrapper.getElementsByClassName('E2EE_ERROR')[0].style.display = '';
+      wrapper.innerHTML = this.html(locked);
 
-      Utils.AttachEventToClass(wrapper, 'E2EE_UNBLOCK', 'submit', (e) => {
+      let busy = false;
+      Utils.AttachEventToClass(wrapper, 'E2EE_UNBLOCK', 'submit', async (e) => {
         e.preventDefault();
-        this.Remove();
-        passwordCallback(wrapper.getElementsByClassName('E2EE_PASSWORD')[0].value);
+        if (busy) return;
+        busy = true;
+        const input = wrapper.getElementsByClassName('E2EE_PASSWORD')[0];
+        const button = wrapper.getElementsByClassName('E2EE_SUBMIT')[0];
+        const error = wrapper.getElementsByClassName('E2EE_ERROR')[0];
+        error.style.display = 'none';
+        button.textContent = 'Unlocking…';
+        let ok = false;
+        let failure = 'Wrong password';
+        try {
+          ok = await tryPassword(input.value);
+        } catch (err) {
+          Utils.Error('unlock failed', err);
+          failure = `Couldn't unlock: ${err?.message ?? err}`;
+        }
+        busy = false;
+        if (ok) {
+          if (this.domElement === wrapper) this.Remove();
+          return;
+        }
+        button.textContent = 'Unlock';
+        error.textContent = failure;
+        error.style.display = '';
+        input.select();
       });
       Utils.AttachEventToClass(wrapper, 'E2EE_NEWDB', 'click', () => {
         this.Remove();
         newdbCallback();
       });
       Utils.AttachEventToClass(wrapper, 'E2EE_CANCEL', 'click', () => {
+        if (locked || busy) return;
         this.Remove();
         if (cancelCallback) cancelCallback();
       });
@@ -554,6 +605,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     },
     Remove: function () {
       Utils.CloseDialog(this.domElement);
+      this.domElement = null;
     },
   };
   const NewdbWindow = {
@@ -1380,6 +1432,10 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
           icon: KeySvg,
         });
       }
+      addItem('Require sealed messages', () => api.toggleRequireSeal(), {
+        selected: api.getRequireSeal(),
+        title: 'Flag messages in this channel that have no seal (sent by 2.x or SimpleDiscordCrypt), which cannot be checked for tampering',
+      });
 
       addSeparator();
       if (api.getIsDmChannel()) {
@@ -1399,6 +1455,17 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       addItem('Channel Manager', () => api.channelManager());
 
       addSeparator();
+      const canLock = api.canLock();
+      addItem(canLock ? 'Lock now' : 'Lock now (set a password first)', () => api.lock(), {
+        icon: LockClosedSvg,
+        disabled: !canLock,
+        title: 'Clears your keys from memory and covers Discord until you enter your password (Alt+Shift+L)',
+      });
+      const autoLock = api.getAutoLock();
+      addItem(`Auto-lock: ${autoLock > 0 ? `after ${autoLock} min idle` : 'off'}`, () => api.cycleAutoLock(), {
+        disabled: !canLock,
+        title: 'Click to change. Locks by itself when you have not used Discord for this long',
+      });
       addItem('Export Database', (e) => (e.ctrlKey || e.shiftKey ? api.exportDbRaw() : api.exportDb()), {
         title: 'Hold Ctrl or Shift for an uncompressed JSON export',
       });
@@ -1831,6 +1898,83 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       return this.Utf8BytesToString(buffer);
     },
 
+    // Seal: HMAC-SHA-256 over the payload bytes, truncated to 128 bits. The MAC key is
+    // derived from the message key with HKDF, so the two never share key material.
+    GetMacKey: async function (hashBase64) {
+      if (Cache.macKeys == null) Cache.macKeys = {};
+      let macKey = Cache.macKeys[hashBase64];
+      if (macKey != null) return macKey;
+      const keyBytes = await this.GetKeyBytesByHash(hashBase64);
+      if (keyBytes == null) return null;
+      const base = await crypto.subtle.importKey('raw', keyBytes, 'HKDF', false, ['deriveKey']);
+      macKey = await crypto.subtle.deriveKey(
+        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: this.StringToUtf8Bytes(SealInfo) },
+        base,
+        { name: 'HMAC', hash: 'SHA-256', length: 256 },
+        false,
+        ['sign']
+      );
+      Cache.macKeys[hashBase64] = macKey;
+      return macKey;
+    },
+    Seal: async function (hashBase64, payloadBytes) {
+      const macKey = await this.GetMacKey(hashBase64);
+      if (macKey == null) return null;
+      const mac = await crypto.subtle.sign('HMAC', macKey, payloadBytes);
+      return this.BytesToBase64url(mac.slice(0, 16));
+    },
+
+    // Vault: PBKDF2 gives 48 bytes, the key that wraps everything in the database (32)
+    // and a value to check the password against (16)
+    DeriveVault: async function (password, salt, iterations) {
+      const material = await crypto.subtle.importKey(
+        'raw',
+        this.StringToUtf8Bytes(password),
+        'PBKDF2',
+        false,
+        ['deriveBits']
+      );
+      const bits = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', hash: 'SHA-512', salt, iterations },
+        material,
+        384
+      );
+      return { keyBytes: bits.slice(0, 32), check: this.BytesToBase64(bits.slice(32, 48)) };
+    },
+    // Resolves to the vault key for this password, or null if the password is wrong
+    CheckDbPassword: async function (db, password) {
+      if (db.kdf == null) {
+        // 2.x and SimpleDiscordCrypt databases
+        if (this.BytesToBase64(await this.Sha512_128str(password + db.dbPasswordSalt)) !== db.dbPasswordHash)
+          return null;
+        return await this.AesImportKey(await this.Sha512_256str(password + db.dbKeySalt));
+      }
+      const iterations = Number(db.kdfIterations);
+      if (db.kdf !== VaultKdfName || !(iterations >= 1 && iterations <= 1e8) || typeof db.kdfSalt !== 'string')
+        throw new Error(`this database was made by a newer version, update ${AppName}`);
+      const vault = await this.DeriveVault(password, this.Base64ToBytes(db.kdfSalt), iterations);
+      if (vault.check !== db.dbPasswordHash) return null;
+      return await this.AesImportKey(vault.keyBytes);
+    },
+    // Loads the vault key into memory. Old-format vaults are moved to PBKDF2 here,
+    // since this is the only moment we have the password.
+    UnlockDb: async function (password) {
+      const dbKey = await this.CheckDbPassword(DataBase, password);
+      if (dbKey == null) return false;
+      Cache.dbKey = dbKey;
+      Cache.keys = {};
+      Cache.macKeys = {};
+      if (DataBase.kdf == null || Number(DataBase.kdfIterations) < VaultKdfIterations) {
+        try {
+          await this.SetDbPassword(password);
+          Utils.Log('your key vault now uses PBKDF2');
+        } catch (e) {
+          Utils.Error('could not upgrade the key vault, it stays in the old format', e);
+        }
+      }
+      return true;
+    },
+
     DhGenerateKeys: async () =>
       await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-521' }, true, ['deriveBits']),
     DhImportPublicKey: async (buffer) =>
@@ -2054,23 +2198,16 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
           if (DataBase.keys == null) DataBase.keys = {};
 
           if (DataBase.isEncrypted) {
-            const newdbCallback = () => {
-              this.NewDb(callback, failCallback);
-            };
-            const passwordCallback = async (password) => {
-              if (
-                this.BytesToBase64(await this.Sha512_128str(password + DataBase.dbPasswordSalt)) ===
-                DataBase.dbPasswordHash
-              ) {
-                Cache.dbKey = await this.AesImportKey(
-                  await this.Sha512_256str(password + DataBase.dbKeySalt)
-                );
+            UnlockWindow.Show(
+              async (password) => {
+                if (!(await this.UnlockDb(password))) return false;
                 this.SaveDb();
                 if (callback) callback();
-              } else UnlockWindow.Show(passwordCallback, newdbCallback, failCallback, true);
-            };
-
-            UnlockWindow.Show(passwordCallback, newdbCallback, failCallback);
+                return true;
+              },
+              () => this.NewDb(callback, failCallback),
+              failCallback
+            );
           } else {
             this.SaveDb();
             if (callback) callback();
@@ -2142,29 +2279,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     NewDb: function (callback, cancelCallback) {
       NewdbWindow.Show(
         async (password) => {
-          DataBase = {
-            isEncrypted: password !== '',
-            keys: {},
-            channels: {},
-            autoKeyExchange: 'ask', // 'DM+friends' = automatic with friends, ask everyone else
-          };
-          Cache = { keys: {} };
-          if (DataBase.isEncrypted) {
-            let salts = this.GetRandomUints(2);
-            DataBase.dbPasswordSalt = salts[0];
-            DataBase.dbKeySalt = salts[1];
-
-            DataBase.dbPasswordHash = this.BytesToBase64(
-              await this.Sha512_128str(password + DataBase.dbPasswordSalt)
-            );
-            Cache.dbKey = await this.AesImportKey(
-              await this.Sha512_256str(password + DataBase.dbKeySalt)
-            );
-          }
-
-          await this.NewPersonalKey();
-          await this.NewDhKeys();
-          this.FastSaveDb();
+          await this.CreateDb(password);
           if (callback) callback();
         },
         () => {
@@ -2182,70 +2297,140 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
         cancelCallback
       );
     },
+    CreateDb: async function (password) {
+      DataBase = {
+        isEncrypted: password !== '',
+        keys: {},
+        channels: {},
+        autoKeyExchange: 'ask', // 'DM+friends' = automatic with friends, ask everyone else
+        seenVersion: AppVersion,
+      };
+      Cache = { keys: {} };
+      if (DataBase.isEncrypted) {
+        const salt = this.GetRandomBytes(16);
+        const vault = await this.DeriveVault(password, salt, VaultKdfIterations);
+        DataBase.kdf = VaultKdfName;
+        DataBase.kdfIterations = VaultKdfIterations;
+        DataBase.kdfSalt = this.BytesToBase64(salt);
+        DataBase.dbPasswordHash = vault.check;
+        Cache.dbKey = await this.AesImportKey(vault.keyBytes);
+      }
+
+      await this.NewPersonalKey();
+      await this.NewDhKeys();
+      this.FastSaveDb();
+    },
     NewDbPassword: function (callback) {
       NewPasswordWindow.Show(async (password) => {
-        let newDataBase = Object.assign({}, DataBase);
-        let newDbKey = null;
-        let oldDbKey = Cache.dbKey;
-        newDataBase.isEncrypted = password !== '';
-        if (newDataBase.isEncrypted) {
-          let salts = this.GetRandomUints(2);
-          newDataBase.dbPasswordSalt = salts[0];
-          newDataBase.dbKeySalt = salts[1];
-
-          newDataBase.dbPasswordHash = this.BytesToBase64(
-            await this.Sha512_128str(password + newDataBase.dbPasswordSalt)
+        try {
+          await this.SetDbPassword(password);
+          PopupManager.Notice(
+            password !== '' ? 'Database password changed.' : 'Database password removed. Your keys are no longer protected.',
+            6000
           );
-          newDbKey = await this.AesImportKey(
-            await this.Sha512_256str(password + newDataBase.dbKeySalt)
-          );
-
-          let keys = {};
-          let dhKeyBytes;
-          if (DataBase.isEncrypted) {
-            //re-encrypt keys
-            for (let [keyHash, oldKey] of Object.entries(DataBase.keys)) {
-              let newKey = Object.assign({}, oldKey);
-              let keyBytes = await this.AesDecrypt(oldDbKey, this.Base64ToBytes(oldKey.k /*key*/));
-              newKey.k = this.BytesToBase64(await this.AesEncrypt(newDbKey, keyBytes));
-              keys[keyHash] = newKey;
-            }
-            dhKeyBytes = await this.AesDecrypt(oldDbKey, this.Base64ToBytes(DataBase.dhPrivateKey));
-          } else {
-            //encrypt keys
-            for (let [keyHash, oldKey] of Object.entries(DataBase.keys)) {
-              let newKey = Object.assign({}, oldKey);
-              let keyBytes = this.Base64ToBytes(oldKey.k /*key*/);
-              newKey.k = this.BytesToBase64(await this.AesEncrypt(newDbKey, keyBytes));
-              keys[keyHash] = newKey;
-            }
-            dhKeyBytes = this.Base64ToBytes(DataBase.dhPrivateKey);
-          }
-          newDataBase.dhPrivateKey = this.BytesToBase64(await this.AesEncrypt(newDbKey, dhKeyBytes));
-          newDataBase.keys = keys;
-        } else if (DataBase.isEncrypted) {
-          //decrypt keys
-          delete newDataBase.dbPasswordSalt;
-          delete newDataBase.dbKeySalt;
-          delete newDataBase.dbPasswordHash;
-          let keys = {};
-          for (let [keyHash, oldKey] of Object.entries(DataBase.keys)) {
-            let newKey = Object.assign({}, oldKey);
-            let keyBytes = await this.AesDecrypt(oldDbKey, this.Base64ToBytes(oldKey.k /*key*/));
-            newKey.k = this.BytesToBase64(keyBytes);
-            keys[keyHash] = newKey;
-          }
-          let dhKeyBytes = await this.AesDecrypt(oldDbKey, this.Base64ToBytes(DataBase.dhPrivateKey));
-          newDataBase.dhPrivateKey = this.BytesToBase64(dhKeyBytes);
-          newDataBase.keys = keys;
+        } catch (e) {
+          Utils.Error('failed to change the database password', e);
+          PopupManager.Notice('The database password could not be changed. Nothing was modified.');
+          return;
         }
-
-        DataBase = newDataBase;
-        Cache.dbKey = newDbKey;
-        Cache.keys = {};
-        this.FastSaveDb();
         if (callback) callback();
       });
+    },
+    // Re-wraps every key with a vault key made from this password ('' removes the password).
+    // Works on a copy and swaps it in at the end, so a failure leaves the database untouched.
+    SetDbPassword: async function (password) {
+      const wasEncrypted = !!DataBase.isEncrypted;
+      const oldDbKey = Cache.dbKey;
+      let newDataBase = Object.assign({}, DataBase);
+      let newDbKey = null;
+      for (const field of ['dbPasswordSalt', 'dbKeySalt', 'dbPasswordHash', 'kdf', 'kdfIterations', 'kdfSalt'])
+        delete newDataBase[field];
+      newDataBase.isEncrypted = password !== '';
+      if (newDataBase.isEncrypted) {
+        const salt = this.GetRandomBytes(16);
+        const vault = await this.DeriveVault(password, salt, VaultKdfIterations);
+        newDataBase.kdf = VaultKdfName;
+        newDataBase.kdfIterations = VaultKdfIterations;
+        newDataBase.kdfSalt = this.BytesToBase64(salt);
+        newDataBase.dbPasswordHash = vault.check;
+        newDbKey = await this.AesImportKey(vault.keyBytes);
+      } else if (!wasEncrypted) return;
+
+      const unwrap = async (base64) => {
+        const bytes = this.Base64ToBytes(base64);
+        return wasEncrypted ? await this.AesDecrypt(oldDbKey, bytes) : bytes;
+      };
+      const wrap = async (bytes) =>
+        this.BytesToBase64(newDbKey != null ? await this.AesEncrypt(newDbKey, bytes) : bytes);
+
+      let keys = {};
+      for (let [keyHash, oldKey] of Object.entries(DataBase.keys)) {
+        let newKey = Object.assign({}, oldKey);
+        newKey.k = await wrap(await unwrap(oldKey.k /*key*/));
+        keys[keyHash] = newKey;
+      }
+      newDataBase.keys = keys;
+      if (DataBase.dhPrivateKey != null)
+        newDataBase.dhPrivateKey = await wrap(await unwrap(DataBase.dhPrivateKey));
+
+      DataBase = newDataBase;
+      Cache.dbKey = newDbKey;
+      Cache.keys = {};
+      Cache.macKeys = {};
+      this.FastSaveDb();
+    },
+
+    // Lock: forget every key and cover Discord until the password is entered again.
+    // Message events wait in the queue meanwhile and are decrypted after unlocking.
+    CanLock: () => DataBase != null && !!DataBase.isEncrypted,
+    LockDb: function () {
+      if (!Loaded || Locked || !this.CanLock()) return false;
+      Locked = true;
+      lockWait = new Promise((resolve) => {
+        lockRelease = resolve;
+      });
+      this.SaveDb();
+      MenuBar.CloseMenu();
+      for (const dialog of [NewPasswordWindow, KeyManagerWindow, ChannelManagerWindow, ShareKeyWindow, KeyVisualizerWindow])
+        dialog.Remove();
+      LockMessages();
+      Cache.dbKey = null;
+      Cache.keys = {};
+      Cache.macKeys = {};
+
+      UnlockWindow.Show(
+        async (password) => {
+          const dbKey = await this.CheckDbPassword(DataBase, password);
+          if (dbKey == null) return false;
+          Cache.dbKey = dbKey;
+          Locked = false;
+          lastActivity = Date.now();
+          this.RefreshCache(); // channel switches were not tracked while locked
+          UnlockMessages(true);
+          if (lockRelease != null) lockRelease();
+          lockWait = lockRelease = null;
+          MenuBar.Update();
+          Utils.Log('unlocked');
+          return true;
+        },
+        null,
+        null,
+        true
+      );
+      Utils.Log('locked');
+      return true;
+    },
+    GetAutoLock: () => {
+      const minutes = Number(DataBase?.autoLock) || 0;
+      return minutes > 0 ? minutes : 0;
+    },
+    CycleAutoLock: function () {
+      const current = AutoLockChoices.indexOf(this.GetAutoLock());
+      const next = AutoLockChoices[(current + 1) % AutoLockChoices.length];
+      if (next > 0) DataBase.autoLock = next;
+      else delete DataBase.autoLock;
+      this.FastSaveDb();
+      return next;
     },
     NewDhKeys: async function () {
       let dhKeys = await this.DhGenerateKeys();
@@ -2304,6 +2489,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       this.ReplaceChannelKeys(hash, DataBase.personalKeyHash);
       delete DataBase.keys[hash];
       delete Cache.keys[hash];
+      if (Cache.macKeys != null) delete Cache.macKeys[hash];
       if (DataBase.trustedKeys != null && DataBase.trustedKeys[hash]) {
         delete DataBase.trustedKeys[hash];
         if (Object.keys(DataBase.trustedKeys).length === 0) delete DataBase.trustedKeys;
@@ -2436,6 +2622,15 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       }
 
       this.ClearCurrentChannelAttachments();
+    },
+    GetCurrentChannelRequireSeal: () => Cache.channelConfig != null && !!Cache.channelConfig.q,
+    ToggleCurrentChannelRequireSeal: function () {
+      if (Cache.channelId == null) return;
+      if (Cache.channelConfig == null)
+        Cache.channelConfig = this.NewChannelConfig(Cache.channelId, null, null, false);
+      if (Cache.channelConfig.q) delete Cache.channelConfig.q;
+      else Cache.channelConfig.q = 1;
+      this.FastSaveDb();
     },
     SetCurrentChannelKey: async function (hash) {
       if (Cache.channelConfig == null)
@@ -2802,6 +2997,11 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     },
     KeyRotationTimeout: function (keyHash, keyRotator, timeFromNow) {
       return setTimeout(async () => {
+        if (Locked) {
+          // needs the vault key: try again once unlocked
+          KeyRotators[keyHash] = this.KeyRotationTimeout(keyHash, keyRotator, 60000);
+          return;
+        }
         delete DataBase.keyRotators[keyHash];
         delete KeyRotators[keyHash];
         let now = Date.now();
@@ -2889,6 +3089,10 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
   var Initialized = false;
   var Loaded = false;
   var Active = false; // false while the database is locked or the plugin is unloaded
+  var Locked = false; // locked by the user or by auto-lock (see Utils.LockDb)
+  var lockWait = null;
+  var lockRelease = null;
+  var lastActivity = Date.now();
 
   function Init(final) {
     Discord = { window: PageWindow, modules: {} };
@@ -3109,6 +3313,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     Style.Inject();
 
     LockMessages();
+    installSendHooks();
     Utils.LoadDb(
       () => {
         Load();
@@ -3197,8 +3402,13 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     } catch (e) {}
   }
 
-  const withTimeout = (promise, ms) =>
-    Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(false), ms))]);
+  const withTimeout = (promise, ms) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
 
   var dispatchChain = Promise.resolve();
   var pendingDispatches = 0;
@@ -3228,6 +3438,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     pendingDispatches++;
     const run = async () => {
       try {
+        if (Locked && lockWait != null) await lockWait;
         if (!Active) candidates = [];
         let swallow = false;
         const ctx = { waitedKeys: new Set() };
@@ -3254,11 +3465,15 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
   function LockMessages() {
     Active = false;
     pendingDispatches++;
-    dispatchChain = new Promise((resolve) => {
+    const gate = new Promise((resolve) => {
       dbGateResolve = resolve;
-    }).finally(() => {
-      pendingDispatches--;
     });
+    // behind whatever is already queued, so order is kept when locking mid-session
+    dispatchChain = dispatchChain
+      .then(() => gate)
+      .finally(() => {
+        pendingDispatches--;
+      });
     Discord.detour_dispatch = HandleDispatch;
   }
   function UnlockMessages(loaded) {
@@ -3749,6 +3964,12 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     ctx = ctx || { waitedKeys: new Set() };
     if (!Array.isArray(message.embeds)) message.embeds = [];
 
+    // read the seal before the content is replaced below
+    const sealMatch =
+      typeof message.content === 'string' && message.content.startsWith(payload)
+        ? sealRegex.exec(message.content.slice(payload.length))
+        : null;
+
     let payloadBuffer = Utils.PayloadDecode(payload).buffer;
     let keyHashBytes = payloadBuffer.slice(0, 16);
     let keyHashBase64 = Utils.BytesToBase64(keyHashBytes);
@@ -3793,6 +4014,14 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
         message.attachments = [];
         return messageDeleted;
       }
+    }
+
+    if (sealMatch != null && (await Utils.Seal(keyHashBase64, payloadBuffer)) !== sealMatch[1]) {
+      Utils.Warn('a message failed its seal check and was not shown', message.id);
+      message.content = tamperedMessage;
+      message.embeds = [];
+      message.attachments = [];
+      return false;
     }
 
     let channelId = message.channel_id;
@@ -3882,6 +4111,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       message.content = marker + content;
       postProcessMessage(message, content);
     }
+    if (sealMatch == null && channelConfig != null && channelConfig.q) message.content += unsealedNote;
 
     if (Array.isArray(message.attachments) && message.attachments.length !== 0 && !ignoreAttachments) {
       let attachments = message.attachments;
@@ -4281,10 +4511,26 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     return { encrypt: true, body };
   }
 
-  function formatEncryptedContent(payload) {
-    const full = `${payload}\n${MessageTagLine}`;
+  function formatEncryptedContent(payload, seal) {
+    const full = `${payload}\n${seal ? MessageTagLineSealed(seal) : MessageTagLine}`;
     if (full.length <= MessageLengthLimit) return full;
-    return `${payload} ${MessageTagShort}`;
+    const short = `${payload} ${seal ? MessageTagShortSealed(seal) : MessageTagShort}`;
+    // at the very limit, sending without a seal beats not sending
+    if (seal && short.length > MessageLengthLimit) return `${payload} ${MessageTagShort}`;
+    return short;
+  }
+
+  // While the vault is locked (or waiting for its password at startup) nothing can be
+  // encrypted. Refuse instead of letting the message go out as plain text.
+  function blockedByLock(channelId, content) {
+    if (DataBase == null || !DataBase.isEncrypted || channelId == null) return false;
+    if (!Locked && !(dbGateResolve != null && Cache.dbKey == null)) return false;
+    if (Utils.GetChannelBlacklist(channelId) === 1) return false;
+    return prefixRegex.test(typeof content === 'string' ? content : '') || !!DataBase.channels?.[channelId]?.e;
+  }
+  function refuseLockedSend(what) {
+    Utils.Warn(`${what} was NOT sent: ${AppName} is locked`);
+    PopupManager.Notice(`${AppName} is locked, so ${what} was not sent. Unlock and send it again.`);
   }
 
   // Encrypts message.content in place; returns the key used, or null if the message stays plain
@@ -4308,7 +4554,8 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
         ? Utils.ConcatBuffers([keyHashBytes, await Utils.AesEncryptCompressString(key, plan.body)])
         : keyHashBytes;
 
-    message.content = formatEncryptedContent(Utils.PayloadEncode(messageBytes));
+    const seal = await Utils.Seal(keyHash, messageBytes);
+    message.content = formatEncryptedContent(Utils.PayloadEncode(messageBytes), seal);
     return { key, keyHash };
   }
 
@@ -4355,6 +4602,13 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
 
   // Runs when a file is attached: swaps in an encrypted copy before Discord uploads it
   async function handleCloudUpload() {
+    if (blockedByLock(this.channelId, '')) {
+      refuseLockedSend('your file');
+      try {
+        this.cancel?.();
+      } catch (e) {}
+      return;
+    }
     let info = null;
     try {
       if (this.__e2ee == null && this.item?.file != null && this.status !== 'COMPLETED')
@@ -4449,6 +4703,14 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     const channelId = message?.channelId ?? message?.channel_id;
     if (message == null || channelId == null || packet.type === 2 /*command*/)
       return Discord.original_enqueue.apply(this, arguments);
+    if (blockedByLock(channelId, message.content)) {
+      refuseLockedSend('your message');
+      try {
+        if (typeof callback === 'function')
+          callback({ ok: false, hasErr: true, status: 0, body: { message: `${AppName} is locked` } });
+      } catch (e) {}
+      return;
+    }
     if (getOutgoingPlan(channelId, message.content) == null && !messageHasEncryptedUploads(message))
       return Discord.original_enqueue.apply(this, arguments);
 
@@ -4474,6 +4736,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
 
   // Fallback path when MessageQueue can't be found
   async function handleSendMessageFallback(channelId, message, options) {
+    if (blockedByLock(channelId, message?.content)) return refuseLockedSend('your message');
     try {
       const plan = getOutgoingPlan(channelId, message?.content);
       if (plan != null) {
@@ -4497,6 +4760,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     return await Discord.original_sendMessage.apply(this, arguments);
   }
   async function handleEditMessageFallback(channelId, messageId, message) {
+    if (blockedByLock(channelId, message?.content)) return refuseLockedSend('your edit');
     try {
       await encryptOutgoing(channelId, message);
     } catch (err) {
@@ -4580,6 +4844,30 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
   };
   const onPageHide = () => Utils.SaveDb();
 
+  const activityEvents = ['pointerdown', 'pointermove', 'keydown', 'wheel'];
+  const onActivity = () => {
+    lastActivity = Date.now();
+  };
+  const onHotkey = (event) => {
+    if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey || event.code !== 'KeyL') return;
+    if (!Utils.LockDb()) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  var autoLockInterval;
+  const checkAutoLock = () => {
+    const minutes = Utils.GetAutoLock();
+    if (minutes > 0 && !Locked && Date.now() - lastActivity >= minutes * 60000) Utils.LockDb();
+  };
+
+  function installSendHooks() {
+    if (Discord.original_enqueue != null && Discord.hookedAliases.includes('enqueue'))
+      Discord.detour_enqueue = handleEnqueue;
+    if (Discord.hookedAliases.includes('sendMessage')) Discord.detour_sendMessage = handleSendMessageFallback;
+    if (Discord.hookedAliases.includes('editMessage')) Discord.detour_editMessage = handleEditMessageFallback;
+    if (Discord.hookedAliases.includes('cloudUpload')) Discord.detour_cloudUpload = handleCloudUpload;
+  }
+
   var dbSaveInterval;
   function Load() {
     Loaded = true;
@@ -4588,11 +4876,7 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     Style.Inject();
 
     Discord.detour_dispatch = HandleDispatch;
-    if (Discord.original_enqueue != null && Discord.hookedAliases.includes('enqueue'))
-      Discord.detour_enqueue = handleEnqueue;
-    if (Discord.hookedAliases.includes('sendMessage')) Discord.detour_sendMessage = handleSendMessageFallback;
-    if (Discord.hookedAliases.includes('editMessage')) Discord.detour_editMessage = handleEditMessageFallback;
-    if (Discord.hookedAliases.includes('cloudUpload')) Discord.detour_cloudUpload = handleCloudUpload;
+    installSendHooks();
 
     if (Discord.hookedAliases.includes('canUseEmojisEverywhere'))
       Discord.detour_canUseEmojisEverywhere = function () {
@@ -4663,6 +4947,26 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       selectKey: async (key) => {
         await Utils.SetCurrentChannelKey(key.hash);
         MenuBar.Update();
+      },
+      getRequireSeal: () => Utils.GetCurrentChannelRequireSeal(),
+      toggleRequireSeal: () => {
+        Utils.ToggleCurrentChannelRequireSeal();
+        PopupManager.Notice(
+          Utils.GetCurrentChannelRequireSeal()
+            ? 'Unsealed messages in this channel are now flagged. Reopen the channel to re-check messages already on screen.'
+            : 'Unsealed messages in this channel are no longer flagged.',
+          8000
+        );
+      },
+      canLock: () => Utils.CanLock(),
+      lock: () => Utils.LockDb(),
+      getAutoLock: () => Utils.GetAutoLock(),
+      cycleAutoLock: () => {
+        const minutes = Utils.CycleAutoLock();
+        PopupManager.Notice(
+          minutes > 0 ? `Auto-lock: after ${minutes} minutes without activity.` : 'Auto-lock is off.',
+          5000
+        );
       },
       getIsDmChannel: () => Utils.GetCurrentChannelIsDm(),
       getAutoKeyExchange: () => Utils.GetAutoKeyExchangeFriends(),
@@ -4796,6 +5100,12 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
 
     dbSaveInterval = setInterval(() => Utils.SaveDb(), 10000);
 
+    lastActivity = Date.now();
+    for (const type of activityEvents)
+      PageWindow.addEventListener(type, onActivity, { capture: true, passive: true });
+    PageWindow.addEventListener('keydown', onHotkey, true);
+    autoLockInterval = setInterval(checkAutoLock, 5000);
+
     KeyRotators = {};
     if (DataBase.keyRotators != null) {
       for (let [keyHash, keyRotator] of Object.entries(DataBase.keyRotators))
@@ -4809,6 +5119,16 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       } catch (e) {
         Cache.pingOn = null;
       }
+    }
+
+    if (DataBase.seenVersion !== AppVersion) {
+      if (!/^3\./.test(String(DataBase.seenVersion ?? '')))
+        PopupManager.Notice(
+          `${AppName} 3.0: your messages are now sealed against tampering, your key vault is hardened, and you can lock it with Alt+Shift+L. Right-click the lock for the new options.`,
+          30000
+        );
+      DataBase.seenVersion = AppVersion;
+      Utils.FastSaveDb();
     }
 
     Utils.Log(`v${AppVersion} loaded (${host.name || 'standalone'}) — ${AppCredit}`);
@@ -4842,6 +5162,15 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
     document.removeEventListener('visibilitychange', onPageHide);
 
     clearInterval(dbSaveInterval);
+    clearInterval(autoLockInterval);
+    for (const type of activityEvents) PageWindow.removeEventListener(type, onActivity, { capture: true });
+    PageWindow.removeEventListener('keydown', onHotkey, true);
+    if (Locked) {
+      // let queued events through undecrypted; start() locks again
+      UnlockMessages(false);
+      if (lockRelease != null) lockRelease();
+      lockWait = lockRelease = null;
+    }
     for (const timeout of Object.values(KeyRotators)) clearTimeout(timeout);
     KeyRotators = {};
     Utils.SaveDb();
@@ -5004,6 +5333,11 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
         TryInit();
       } else if (Initialized && !Loaded && DataBase != null) {
         Load();
+        if (Locked) {
+          // stopped while locked: the keys are gone, so ask for the password again
+          Locked = false;
+          Utils.LockDb();
+        }
       } else if (!Initialized) {
         TryInit();
       }
@@ -5013,6 +5347,28 @@ img[src*="/emojis/${EncOtherKeyEmojiId}"] { content: url("${svgDataUri(EncOtherK
       removeConsoleApi();
       if (Loaded) Unload();
     },
+    ...(host.testHooks
+      ? {
+          internals: {
+            Utils,
+            UnlockWindow,
+            NewdbWindow,
+            PopupManager,
+            get DataBase() {
+              return DataBase;
+            },
+            get Cache() {
+              return Cache;
+            },
+            get Locked() {
+              return Locked;
+            },
+            get Active() {
+              return Active;
+            },
+          },
+        }
+      : null),
   };
 }
 

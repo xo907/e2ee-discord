@@ -18,6 +18,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.regex.Pattern
 import javax.crypto.Cipher
+import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -72,22 +73,83 @@ internal object Protocol {
         return iv + cipher.doFinal(data)
     }
 
-    const val TAG_LINE = "-# 🔒 Encrypted with [E2EE-Discord](<https://github.com/xo907/e2ee-discord>)"
-    private const val TAG_SHORT = "[🔒](<https://github.com/xo907/e2ee-discord>)"
+    private const val PROJECT_URL = "https://github.com/xo907/e2ee-discord"
+    private const val TAG_SHORT = "[🔒](<$PROJECT_URL>)"
     private const val MESSAGE_LENGTH_LIMIT = 2000
+
+    /* ───────────── seal (desktop 3.0) ───────────── */
+
+    private val SEAL_INFO = "E2EE-Discord seal v1".toByteArray(Charsets.UTF_8)
+
+    /** The seal in a message's tag line, if it has one. Group 1 is the seal. */
+    val sealPattern: Pattern = Pattern.compile(
+        """e2ee-discord#s=([A-Za-z0-9_-]{22})(?![A-Za-z0-9_-])""",
+        Pattern.CASE_INSENSITIVE,
+    )
+
+    private fun hmac(algorithm: String, key: ByteArray, data: ByteArray): ByteArray {
+        val mac = Mac.getInstance(algorithm)
+        mac.init(SecretKeySpec(key, algorithm))
+        return mac.doFinal(data)
+    }
+
+    /**
+     * HMAC-SHA-256 over the payload bytes, cut to 16 bytes, as unpadded base64url. The MAC key is
+     * HKDF-SHA-256(message key, no salt, info "E2EE-Discord seal v1"), written out here as its two steps.
+     */
+    fun seal(key: ByteArray, payload: ByteArray): String {
+        val extracted = hmac("HmacSHA256", ByteArray(32), key)
+        val macKey = hmac("HmacSHA256", extracted, SEAL_INFO + byteArrayOf(1))
+        return Base64.encodeToString(
+            hmac("HmacSHA256", macKey, payload).copyOf(16),
+            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
+        )
+    }
+
+    /** False only if [content] carries a seal that doesn't fit. Messages without one (2.x clients) pass. */
+    fun sealMatches(key: ByteArray, payload: ByteArray, content: String): Boolean {
+        val matcher = sealPattern.matcher(content)
+        if (!matcher.find()) return true
+        return MessageDigest.isEqual(
+            seal(key, payload).toByteArray(Charsets.UTF_8),
+            matcher.group(1)!!.toByteArray(Charsets.UTF_8),
+        )
+    }
+
+    /**
+     * PBKDF2-HMAC-SHA-512 for the database password (desktop 3.0 vaults), up to one block (64 bytes).
+     * Written out because the platform's version treats non-ASCII passwords differently between Android releases.
+     */
+    fun pbkdf2Sha512(password: ByteArray, salt: ByteArray, iterations: Int, length: Int): ByteArray {
+        require(length in 1..64 && iterations >= 1) { "invalid PBKDF2 parameters" }
+        val mac = Mac.getInstance("HmacSHA512")
+        mac.init(SecretKeySpec(password, "HmacSHA512"))
+        mac.update(salt)
+        var block = mac.doFinal(byteArrayOf(0, 0, 0, 1))
+        val out = block.copyOf()
+        for (i in 1 until iterations) {
+            block = mac.doFinal(block)
+            for (j in out.indices) out[j] = (out[j].toInt() xor block[j].toInt()).toByte()
+        }
+        return out.copyOf(length)
+    }
 
     /** Prefixes that force encryption / plain text for a single message (same as desktop) */
     val encryptPrefix: Pattern = Pattern.compile("""^(?::?ENC(?:(?:_\w*)?:|\b)|<:ENC:\d{1,20}>)\s*""")
     val noEncryptPrefix: Pattern = Pattern.compile("""^(?::?NOENC:?|<:NOENC:\d{1,20}>)\s*""")
 
-    /** Builds the message content: braille(keyHash ‖ AES(compress(text))) + tag line */
+    /** Builds the message content: braille(keyHash ‖ AES(compress(text))) + tag line carrying the seal */
     fun encryptMessage(keyHashBase64: String, key: ByteArray, text: String): String {
         val keyHashBytes = fromBase64(keyHashBase64)
         val bytes = if (text.isEmpty()) keyHashBytes
         else keyHashBytes + aesEncrypt(key, tryCompress(text.toByteArray(Charsets.UTF_8)))
         val payload = payloadEncode(bytes)
-        val full = "$payload\n$TAG_LINE"
-        return if (full.length <= MESSAGE_LENGTH_LIMIT) full else "$payload $TAG_SHORT"
+        val tag = seal(key, bytes)
+        val full = "$payload\n-# 🔒 Encrypted with [E2EE-Discord](<$PROJECT_URL#s=$tag>)"
+        if (full.length <= MESSAGE_LENGTH_LIMIT) return full
+        val short = "$payload [🔒](<$PROJECT_URL#s=$tag>)"
+        // at the very limit, sending without a seal beats not sending
+        return if (short.length <= MESSAGE_LENGTH_LIMIT) short else "$payload $TAG_SHORT"
     }
 
     private const val FILENAME_LIMIT = 47

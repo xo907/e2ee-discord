@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "E2EE-Discord",
   "short_name": "E2EE-Discord",
-  "version": "2.0.2",
+  "version": "3.0.0",
   "description": "End-to-end encryption for Discord messages and files, with automatic key exchange. Made by XO.ST",
   "author": "XO.ST",
   "homepage_url": "https://github.com/xo907/e2ee-discord",

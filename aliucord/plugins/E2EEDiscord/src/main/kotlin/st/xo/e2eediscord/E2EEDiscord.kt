@@ -7,20 +7,27 @@
  * Phase 2: sends and edits encrypted messages (/e2ee on).
  * Phase 3: key exchange.
  * Phase 4: encrypted files, images, video and audio.
+ * 0.5.0: sealed messages, 3.0 databases, and an indicator on the message box while encryption is on.
  */
 
 package st.xo.e2eediscord
 
 import android.content.Context
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.ViewGroup
+import android.widget.EditText
 import androidx.recyclerview.widget.RecyclerView
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.CommandContext
 import com.aliucord.entities.Plugin
+import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.aliucord.patcher.after
 import com.aliucord.patcher.before
@@ -32,6 +39,7 @@ import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemAttachment
 import com.discord.widgets.chat.list.entries.AttachmentEntry
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import java.io.File
+import java.lang.ref.WeakReference
 import com.discord.restapi.PayloadJSON
 import com.discord.restapi.RestAPIParams
 import com.discord.stores.StoreChat
@@ -114,6 +122,7 @@ class E2EEDiscord : Plugin() {
         startPart("attachments", ::patchAttachments)
         startPart("attachment taps", ::patchAttachmentTaps)
         startPart("/e2ee command", ::registerCommands)
+        startPart("indicator", ::patchIndicator)
     }
 
     // how often the send hooks ran, for /e2ee debug
@@ -199,7 +208,134 @@ class E2EEDiscord : Plugin() {
 
     companion object {
         internal const val SETTING_ANSWER_EXCHANGES = "answerKeyExchanges"
-        internal const val VERSION = "0.4.4"
+        internal const val VERSION = "0.5.0"
+
+        // the red of the desktop plugin's lock and outline
+        private const val INDICATOR_COLOR = 0xFFFF0000.toInt()
+        private const val INDICATOR_HINT_COLOR = 0xFFFF5C5C.toInt()
+    }
+
+    /* ─────────────────────────────── indicator ─────────────────────────────── */
+
+    // Like the red outline on desktop: while encryption is on in the open chat, the message box
+    // gets a red outline and its placeholder says so. Nothing in Discord's layout is changed: the
+    // outline is drawn in an overlay, and the placeholder is put back when encryption is off.
+
+    private class Indicator(
+        val host: View,
+        val outline: GradientDrawable,
+        val layoutListener: View.OnLayoutChangeListener,
+        var originalHint: CharSequence?,
+        val originalHintColors: ColorStateList?,
+        var label: String,
+    )
+
+    private val indicators = java.util.WeakHashMap<EditText, Indicator>()
+    private var messageBox: WeakReference<EditText>? = null
+
+    private fun patchIndicator() {
+        // looked up by name, so a Discord build without it only disables the indicator
+        val widget = Class.forName("com.discord.widgets.chat.input.WidgetChatInput")
+        val getView = widget.getMethod("getView")
+        val configure = widget.declaredMethods.filter { it.name == "configureUI" }
+        if (configure.isEmpty()) throw NoSuchMethodException("WidgetChatInput.configureUI")
+        for (method in configure) {
+            // runs whenever the message box is set up again, including when another chat is opened
+            patcher.patch(
+                method,
+                Hook { param ->
+                    try {
+                        val root = getView.invoke(param.thisObject) as View? ?: return@Hook
+                        val input = findMessageBox(root) ?: return@Hook
+                        messageBox = WeakReference(input)
+                        updateIndicator(input)
+                    } catch (e: Throwable) {
+                        logger.error("Couldn't update the encryption indicator", e)
+                    }
+                },
+            )
+        }
+    }
+
+    private fun findMessageBox(root: View): EditText? {
+        val id = Utils.getResId("text_input", "id")
+        if (id != 0) (root.findViewById<View>(id) as? EditText)?.let { return it }
+        return firstEditText(root)
+    }
+
+    private fun firstEditText(view: View): EditText? {
+        if (view is EditText) return view
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) firstEditText(view.getChildAt(i))?.let { return it }
+        }
+        return null
+    }
+
+    /** Shows the current state on the message box again; call on the main thread */
+    private fun refreshIndicator() {
+        try {
+            messageBox?.get()?.let { updateIndicator(it) }
+        } catch (e: Throwable) {
+            logger.error("Couldn't update the encryption indicator", e)
+        }
+    }
+
+    private fun updateIndicator(input: EditText) {
+        val channelId = com.discord.stores.StoreStream.getChannelsSelected().id
+        val shown = indicators[input]
+        if (!database.isLoaded || !database.isChannelEncrypted(channelId)) {
+            if (shown != null) removeIndicator(input, shown)
+            return
+        }
+        val label = if (database.isUnlocked) {
+            "🔒 Encrypted · ${keyLabel(database.channelKeyHash(channelId))}"
+        } else {
+            "🔒 Encryption is on, but the database is locked"
+        }
+
+        if (shown == null) {
+            val density = input.resources.displayMetrics.density
+            val outline = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(Color.TRANSPARENT)
+                setStroke((1.5f * density).toInt().coerceAtLeast(2), INDICATOR_COLOR)
+                cornerRadius = 8f * density
+            }
+            // around the box the text field sits in: the field itself scrolls, which would move the outline
+            val host = input.parent as? View ?: input
+            val layoutListener = View.OnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+                outline.setBounds(0, 0, view.width, view.height)
+            }
+            outline.setBounds(0, 0, host.width, host.height)
+            host.overlay.add(outline)
+            host.addOnLayoutChangeListener(layoutListener)
+            indicators[input] = Indicator(host, outline, layoutListener, input.hint, input.hintTextColors, label)
+        } else {
+            // Discord sets its own placeholder again when the chat changes: that's the one to restore
+            if (input.hint?.toString() != shown.label) shown.originalHint = input.hint
+            shown.label = label
+        }
+        input.hint = label
+        input.setHintTextColor(INDICATOR_HINT_COLOR)
+    }
+
+    private fun removeIndicator(input: EditText, shown: Indicator) {
+        indicators.remove(input)
+        shown.host.overlay.remove(shown.outline)
+        shown.host.removeOnLayoutChangeListener(shown.layoutListener)
+        if (input.hint?.toString() == shown.label) input.hint = shown.originalHint
+        shown.originalHintColors?.let { input.setHintTextColor(it) }
+    }
+
+    private fun removeAllIndicators() {
+        for ((input, shown) in indicators.entries.toList()) {
+            try {
+                removeIndicator(input, shown)
+            } catch (e: Throwable) {
+                logger.error("Couldn't remove the encryption indicator", e)
+            }
+        }
+        messageBox = null
     }
 
     /* ─────────────────────────────── key exchange ─────────────────────────────── */
@@ -255,12 +391,14 @@ class E2EEDiscord : Plugin() {
         patcher.unpatchAll()
         commands.unregisterCommand("e2ee")
         restoreSwapped()
+        mainHandler.post { removeAllIndicators() }
     }
 
     /** Called by the settings page when the database was imported, unlocked or removed */
     internal fun onDatabaseChanged() {
         // the decryptor notices the new database version and drops its cache
         logger.info("Key database changed: ${database.keyCount} keys, unlocked=${database.isUnlocked}")
+        mainHandler.post { refreshIndicator() }
     }
 
     /* ─────────────────────────────── reading ─────────────────────────────── */
@@ -600,7 +738,11 @@ class E2EEDiscord : Plugin() {
                     "With \"keys\": the number of the key to use in this channel",
                 ),
             ),
-        ) { ctx -> CommandsAPI.CommandResult(runCommand(ctx), null, false) }
+        ) { ctx ->
+            val reply = runCommand(ctx)
+            mainHandler.post { refreshIndicator() } // on/off or the key may have changed
+            CommandsAPI.CommandResult(reply, null, false)
+        }
     }
 
     private fun runCommand(ctx: CommandContext): String {

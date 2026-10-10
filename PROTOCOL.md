@@ -1,6 +1,8 @@
 # E2EE-Discord protocol
 
-This describes the on-the-wire format, so other clients can talk to the JS plugin (the Aliucord/Android port in [`aliucord/`](aliucord/) implements it in Kotlin). It's compatible with SimpleDiscordCrypt. Reference implementation: [`src/core.js`](src/core.js).
+This describes the on-the-wire format, so other clients can talk to the JS plugin (the Aliucord/Android port in [`aliucord/`](aliucord/) implements it in Kotlin). It's compatible with SimpleDiscordCrypt. Reference implementation: [`src/core.js`](src/core.js). The tests in [`test/`](test/) check it against an independent implementation.
+
+Version 3.0 added the [seal](#seal) and a new [vault format](#database-export). Both are marked "3.0" below. Everything else is unchanged since SimpleDiscordCrypt.
 
 ## Primitives
 
@@ -10,17 +12,38 @@ This describes the on-the-wire format, so other clients can talk to the JS plugi
 | Key id ("key hash") | `SHA-512(rawKey)[0:16]` (16 bytes) |
 | Key exchange | ECDH on P-521. Public keys are raw/uncompressed (`0x04 ‖ X ‖ Y`, 133 bytes). Shared secret = the first 256 bits of `deriveBits`, used directly as an AES-256 key |
 | Payload text encoding | every byte `b` becomes the character `U+2800 + b` (braille block) |
+| Seal (3.0) | HMAC-SHA-256, truncated to 16 bytes. Key: HKDF-SHA-256 of the message key |
+| Database password (3.0) | PBKDF2-HMAC-SHA-512, 600,000 iterations, 16-byte salt |
 
 ## Encrypted message
 
 ```
-content = PAYLOAD "\n" "-# 🔒 Encrypted with [E2EE-Discord](<https://github.com/xo907/e2ee-discord>)"
+content = PAYLOAD "\n" "-# 🔒 Encrypted with [E2EE-Discord](<https://github.com/xo907/e2ee-discord#s=SEAL>)"
 PAYLOAD = braille( keyHash[16] ‖ AES(key, MESSAGE) )      // MESSAGE omitted for attachment-only messages
 ```
 
-- If the message is too long, the tag may be shortened to ` [🔒](<https://github.com/xo907/e2ee-discord>)` on the same line.
+- `#s=SEAL` is the [seal](#seal). Clients before 3.0 send the same line without it.
+- If the message is too long, the tag may be shortened to ` [🔒](<https://github.com/xo907/e2ee-discord#s=SEAL>)` on the same line.
 - **Receivers must accept** any payload of 16 or more braille characters, followed by whitespace and a single trailing line containing `e2ee-discord` (case-insensitive). They must also accept the legacy tag `` `SimpleDiscordCrypt` ``, written either plain or in mathematical italics.
 - Regex used: `^([⠀-⣿]{16,})(?:[ \t]*`(?:SimpleDiscordCrypt|𝘚𝘪𝘮𝘱𝘭𝘦𝘋𝘪𝘴𝘤𝘰𝘳𝘥𝘊𝘳𝘺𝘱𝘵)`|\s+[^\n]*e2ee-discord[^\n]*)$` (flag `i`).
+
+### Seal
+
+*Added in 3.0.* AES-CBC alone lets anyone who can change the stored message flip bits in the plaintext. The seal detects that.
+
+```
+macKey = HKDF-SHA-256(ikm = raw message key, salt = empty, info = "E2EE-Discord seal v1", 32 bytes)
+SEAL   = base64url( HMAC-SHA-256(macKey, payloadBytes)[0:16] )      // no padding: 22 characters
+```
+
+- `payloadBytes` is everything the braille text encodes: `keyHash ‖ IV ‖ ciphertext`, or just `keyHash` for an attachment-only message.
+- The seal is put in the fragment of the tag's link, so clients that don't know it still match the tag line and decrypt as before.
+- Receivers find it with `e2ee-discord#s=([A-Za-z0-9_-]{22})(?![A-Za-z0-9_-])` (flag `i`) in the text after the payload.
+  - **Seal present and correct:** show the message.
+  - **Seal present and wrong:** do not show the message or open its attachments.
+  - **No seal:** the message is from an older client. Show it. A client may let the user mark such messages (the reference client's per-channel `q` setting).
+- Senders should always add a seal. If the message would exceed Discord's length limit only because of it, send without.
+- A seal authenticates the payload to holders of the key. It does not identify the sender within a group, and it does not cover attachments.
 
 ### MESSAGE (plaintext before encryption)
 
@@ -70,7 +93,12 @@ Clients must ignore system messages older than the newest one they have already 
 JSON, optionally compressed with the PNG scheme above (`.dat`). Fields:
 
 - `keys`: `{ [keyHashBase64]: { k, t, d, r, l, h } }`. `k` is the raw key in base64. If `isEncrypted` is set, it is AES-encrypted with the database key.
-- `channels`: `{ [channelId]: { k, e, l, d, s?, w? } }`
+- `channels`: `{ [channelId]: { k, e, l, d, s?, w?, q? } }`. `q: 1` marks unsealed messages in that channel (3.0).
 - `personalKeyHash`, `dhPublicKey` (raw, base64), `dhPrivateKey` (PKCS#8, base64, possibly encrypted).
-- `isEncrypted`, `dbPasswordSalt`, `dbKeySalt`, `dbPasswordHash`. The password is checked with `base64(SHA-512(password + salt)[0:16])`. The database key is `SHA-512(password + keySalt)[0:32]`.
+- `isEncrypted`: whether the database has a password. If so, one of these two formats describes it:
+  - **3.0:** `kdf: "PBKDF2-SHA512"`, `kdfIterations` (600000), `kdfSalt` (16 bytes, base64), `dbPasswordHash`.
+    `out = PBKDF2-HMAC-SHA-512(utf8(password), kdfSalt, kdfIterations, 48 bytes)`. The database key is `out[0:32]`, and the password is right if `base64(out[32:48])` equals `dbPasswordHash`.
+  - **Before 3.0** (no `kdf` field): `dbPasswordSalt`, `dbKeySalt` (numbers), `dbPasswordHash`. The password is checked with `base64(SHA-512(password + salt)[0:16])`, and the database key is `SHA-512(password + keySalt)[0:32]`. Clients must still read this format, and should rewrite the database in the 3.0 format once it is unlocked.
+  - A client that meets a `kdf` value it doesn't know must refuse the database rather than guess.
 - `autoKeyExchange`, `trustedKeys`, `keyRotators`, `pingOn`, `isSecondary`.
+- `autoLock` (minutes, absent = off) and `seenVersion` are settings of the reference client (3.0).

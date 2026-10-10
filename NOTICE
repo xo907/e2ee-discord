@@ -10,3 +10,4 @@ Changes from SimpleDiscordCrypt (2026): rebranded UI and icons; rewritten
 module discovery for current Discord builds; new send/upload/receive hooks;
 host-agnostic core with userscript, Manifest V3 extension, Vencord and
 BetterDiscord builds; consent before automatic key exchanges; bug fixes.
+3.0: message seals (HMAC); PBKDF2 key vault; lock and auto-lock; test suite.
